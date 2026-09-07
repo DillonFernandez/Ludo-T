@@ -96,3 +96,10 @@ The current project has been verified with Maven:
 
 This project serves as a Java-based game engineering example that combines simulation logic, object-oriented design, and
 automated testing in one runnable application.
+
+---
+
+<div align="center">
+  <p><strong>Disclaimer</strong></p>
+  <p><em>This is an academic project developed for educational purposes and is not intended for commercial use.</em></p>
+</div>
