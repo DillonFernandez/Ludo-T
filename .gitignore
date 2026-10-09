@@ -1,0 +1,8 @@
+# Maven build output
+/target/
+
+# GitHub configuration and workflows
+/.github/
+
+# Local database file
+/ludotdb.mv.db
