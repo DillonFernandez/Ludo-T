@@ -17,199 +17,137 @@
 
 ## Overview
 
-LUDO-T is a Java 21 application that automatically simulates a four-player Ludo variant. Sixteen computer-controlled pieces move around a 52-cell shared track and colour-specific home paths; no human move selection is required. The implementation combines standard movement, capture, blockade, and finishing rules with bidirectional travel and temporary mystery-cell effects.
+LUDO-T is an Assignment 2 Java application that runs an automatic, four-player Ludo simulation. Each colour has four pieces and a distinct move-selection strategy. The project provides a Swing board and event log, a TCP game server and client, a console simulation, and H2-backed game history.
 
-Two runtime modes are implemented:
-
-- **Local:** one in-process simulation with a Swing board and event log.
-- **Network:** an H2 service, a TCP game server, and one or more Swing observer clients. Requests may arrive concurrently, but games run serially and winners are persisted.
+The GUI connects to a server-owned simulation. The server publishes board snapshots and stores the event messages; the client does not choose moves.
 
 ## Gameplay
 
-- Four automated players (`RED`, `GREEN`, `YELLOW`, and `BLUE`) with four pieces each.
-- The highest opening roll starts; only tied leaders reroll.
-- A six releases a piece from base, then a coin toss sets its clockwise or counter-clockwise direction.
-- Red prioritizes captures and avoids unnecessary blockades; Green favors blockade building; Yellow favors base entry, needed captures, and proximity to home; Blue rotates through pieces and varies mystery-cell preference by direction.
-- A piece must make a capture before entering its home path. Clockwise pieces pass their approach once; counter-clockwise pieces must pass it twice. Reaching home requires an exact roll.
-- Opponents are captured only on landing. Same-colour groups form blockades, move together by `dice value / group size`, stop opposing pieces, and can capture an equal-sized opposing blockade.
-- A six or capture grants another roll. On a third consecutive six, an existing blockade is forcibly split; otherwise the roll is discarded.
-- Once the first piece enters the shared track, a mystery cell appears after two completed rounds. It remains for four rounds, then respawns on a free track cell, avoiding its previous cell when another is available.
-- Mystery effects teleport to Alpha, Beta, Gamma, base, the piece's starting square, or its approach square. Alpha doubles or halves movement temporarily, Beta pauses movement, and Gamma changes direction or redirects to Beta.
-- A player wins when all four pieces reach home. A 10,000-round cap safely ends a simulation with no winner.
+- Players roll a six-sided die. A piece enters from base on a six; rolling a six or capturing an opponent grants another roll.
+- Three consecutive sixes trigger the block-breaking rule. Pieces move clockwise or counter-clockwise, and groups of pieces can form blocks.
+- Landing on an opponent captures its piece and sends it to base. Home entry requires at least one capture; counter-clockwise travel also requires two visits to the player's approach cell.
+- A mystery cell appears after standard-path movement begins, remains active for four rounds and then relocates. Landing on it can send a piece to base, a start/approach cell, or Alpha, Beta or Gamma. These destinations can apply temporary movement, restriction or direction effects.
+- Red favours captures, Green favours forming and keeping blocks, Yellow favours deployment and progress, and Blue cycles pieces while preferring counter-clockwise mystery-cell landings.
+- The first player is selected by repeated dice-roll tie-breaks. A game ends when one player gets all four pieces Home or after 10,000 rounds.
 
 ## Architecture
 
-`GameBuilder` creates the board, random sources, rules, four strategy-specific players, turn manager, and logger. `GameEngine` selects the starting player and runs the automatic turn loop. A player selects a command; the engine executes it, applies capture and mystery effects, publishes state, checks for a winner, and decides whether a bonus turn is due.
+The application separates game rules, application services, persistence and presentation:
 
-```text
-entry point -> GameBuilder -> GameEngine -> player strategy
-                                      |-> Command -> Board / Piece state
-                                      |-> RuleEngine -> movement / capture / block / mystery / win
-                                      `-> GameLogger -> console, Swing, or socket clients
-```
-
-### Runtime flows
-
-| Mode    | Execution flow                                                                     |
-| :------ | :--------------------------------------------------------------------------------- |
-| Local   | `Main` → `GameBuilder` → `GameEngine` → `GuiGameLogger` → `LudoFrame`              |
-| Network | `ClientMain` → `ServerMain` → `GameEngine` → `SocketGameLogger` → all clients + H2 |
-
-- `ServerMain` assigns each connection to a virtual thread and queues every `START_GAME` request on one game executor, preventing simulations from overlapping.
-- `SocketGameLogger` broadcasts readable events and piece-state messages to all registered clients and saves the winner through `GameResultRepository`.
-- `ClientMain` opens a read-only Swing observer, listens on a virtual thread, and requests one game automatically. Swing updates are dispatched on the event thread.
-
-### Entry points
-
-| Class                                   | Purpose                                                                           |
-| :-------------------------------------- | :-------------------------------------------------------------------------------- |
-| `com.ludot.Main`                        | Packaged-JAR entry point; opens local Swing mode and runs one game.               |
-| `com.ludot.database.DatabaseMain`       | Creates/opens `./ludotdb`, then starts H2 TCP (`9092`) and web (`8082`) services. |
-| `com.ludot.server.ServerMain`           | Starts the game server on TCP `5050`; requires H2 to be reachable.                |
-| `com.ludot.client.ClientMain`           | Opens an observer and requests a game; accepts an optional server hostname.       |
-| `com.ludot.client.AutomaticTestClients` | Opens two headless clients and submits five requests from each.                   |
+- `ludot.model`, `ludot.movement`, `ludot.game`, `ludot.behaviour`, `ludot.state` and `ludot.mystery` implement the board, turn flow, move rules, player strategies and temporary effects.
+- `ludot.application` owns the simulation service, repository contract and immutable `GameSnapshot` representation.
+- `ludot.server.GameServer` serves clients, serialises requests with scheduled round advancement and broadcasts snapshots. It accepts up to 32 clients; each connection has reader and writer threads. Requests and round updates share a single worker.
+- `ludot.client.GameClient` sends asynchronous requests and receives replies and pushed updates. `ludot.gui.GameWindow` and `BoardPanel` render the snapshot and paged event log using Swing.
+- `ludot.persistence.JdbcGameRepository` stores simulation snapshots and messages; `DatabaseMain` starts the H2 TCP service.
+- `ludot.Main` runs a standalone console simulation without the server or database.
 
 ## Technology stack
 
-| Area                   | Implementation                                               |
-| :--------------------- | :----------------------------------------------------------- |
-| Language/runtime       | Java 21 language target                                      |
-| Build/package          | Maven; `com.ludot:ludo-t:1.0.0` JAR                          |
-| UI                     | Java Swing                                                   |
-| Networking/concurrency | TCP sockets, executors, virtual threads, `CompletableFuture` |
-| Persistence            | H2 Database Engine 2.3.232                                   |
-| Tests                  | JUnit Jupiter 5.10.2; Maven Surefire 3.2.5                   |
-
-H2 is the only non-JDK production dependency. JUnit API, engine, and parameter support are test-scoped.
+| Component | Implementation                                          |
+| --------- | ------------------------------------------------------- |
+| Language  | Java 17 (Maven compiler release)                        |
+| Build     | Apache Maven; compiler, Surefire, JAR and Shade plugins |
+| GUI       | Java Swing from the JDK                                 |
+| Database  | H2 2.4.240 over JDBC                                    |
+| Tests     | JUnit Jupiter 5.10.2                                    |
 
 ## Project structure
 
 ```text
-src/main/java/com/ludot/
-├── board, model, state       Board topology and mutable piece state
-├── rules, command            Rule evaluation and executable game actions
-├── player, factory           Four strategies and object construction
-├── engine, random            Simulation loop and replaceable random sources
-├── gui, output               Swing rendering and event formatting
-├── client, server            TCP observers, requests, and broadcasts
-└── database                  H2 service and winner repository
-src/test/java/com/ludot/      JUnit suite and deterministic test doubles
-pom.xml                       Dependencies, Java release, plugins, JAR entry point
-ludotdb.mv.db                 File-backed local game-results database
+src/
+├── main/java/ludot/
+│   ├── Main.java                  # Standalone console entry point
+│   ├── application/               # GameService, GameSnapshot, repository contract
+│   ├── behaviour/                 # Four automatic player strategies
+│   ├── client/                    # TCP client and automatic request client
+│   ├── config/                    # GameSettings
+│   ├── game/, model/, movement/   # Simulation, board and rules
+│   ├── gui/                       # GuiMain, GameWindow, BoardPanel
+│   ├── mystery/, state/, random/  # Game effects and random source
+│   ├── network/                   # Wire message helpers
+│   ├── output/                    # Console and game messages
+│   ├── persistence/               # H2 database and JDBC repository
+│   └── server/                    # ServerMain and GameServer
+└── test/java/ludot/               # JUnit tests and process/test fixtures
 ```
 
 ## Setup
 
-### Prerequisites
+Prerequisites: JDK 17 and Maven. From the project root, package the application:
 
-- JDK 21+
-- Apache Maven
-- A graphical desktop for local mode or `ClientMain`
-- Free ports `5050`, `9092`, and `8082` for network mode
-
-Run all commands from the repository root.
-
-### Build and test
-
-```powershell
-mvn package
+```sh
+mvn clean package
 ```
 
-This compiles the project, runs the tests, and creates `target\ludo-t-1.0.0.jar` with `com.ludot.Main` in its manifest.
+The shaded JAR is `target/ludo-t-1.0.jar`. For the networked GUI, start each component in a separate terminal, from the project root:
 
-> [!NOTE]
-> The artifact is not an all-dependencies JAR. Database and server processes also need the H2 JAR on their classpath.
-
-### Run locally
-
-```powershell
-java -jar target\ludo-t-1.0.0.jar
+```sh
+java -cp target/ludo-t-1.0.jar ludot.persistence.DatabaseMain
+java -cp target/ludo-t-1.0.jar ludot.server.ServerMain
+java -jar target/ludo-t-1.0.jar
 ```
 
-The application opens the board/event-log window and immediately runs one game. Local mode neither connects to the server nor persists its winner.
+The database must be available before the game server starts; the GUI then connects to the default game-server address and port. The JAR manifest launches `ludot.gui.GuiMain`.
 
-### Run in network mode
+To run the automatic console simulation without the server stack:
 
-Start these components in separate PowerShell terminals, in order. The example assumes Maven's default local repository; adjust `$h2Jar` when using a custom repository.
-
-1. Start H2:
-
-```powershell
-$h2Jar = Join-Path $env:USERPROFILE '.m2\repository\com\h2database\h2\2.3.232\h2-2.3.232.jar'
-java -cp "target\ludo-t-1.0.0.jar;$h2Jar" com.ludot.database.DatabaseMain
-```
-
-The relative database URL means the process's working directory selects the `ludotdb.mv.db` file.
-
-2. Start the game server:
-
-```powershell
-$h2Jar = Join-Path $env:USERPROFILE '.m2\repository\com\h2database\h2\2.3.232\h2-2.3.232.jar'
-java -cp "target\ludo-t-1.0.0.jar;$h2Jar" com.ludot.server.ServerMain
-```
-
-3. Start one or more observers, using no argument for `localhost` or supplying a remote game-server host:
-
-```powershell
-java -cp "target\ludo-t-1.0.0.jar" com.ludot.client.ClientMain
-java -cp "target\ludo-t-1.0.0.jar" com.ludot.client.ClientMain server-hostname
-```
-
-To queue ten games without opening Swing windows:
-
-```powershell
-java -cp "target\ludo-t-1.0.0.jar" com.ludot.client.AutomaticTestClients
+```sh
+java -cp target/ludo-t-1.0.jar ludot.Main
 ```
 
 ## Configuration
 
-There are no environment variables or external application configuration files. Gameplay values, ports, H2 URLs, and local database credentials are constants in source. The only runtime option is `ClientMain`'s optional server hostname; the game port remains `5050`.
+Defaults are defined in `ludot.config.GameSettings` and the entry points:
+
+| Setting                  | Default                                       |
+| ------------------------ | --------------------------------------------- |
+| Game server              | Port `5050`; binds to `0.0.0.0`               |
+| H2 TCP database          | Port `9092`; database file `data/ludot.mv.db` |
+| JDBC URL                 | `jdbc:h2:tcp://localhost:9092/ludot`          |
+| Database user/password   | `sa` / empty password                         |
+| Rounds per server update | `100`                                         |
+| Maximum game length      | `10,000` rounds                               |
+
+`DatabaseMain` accepts `[port] [database-directory]`. `ServerMain` accepts `[port] [jdbc-url] [bind-host]`. `GuiMain` accepts `[server-address] [port]`; its defaults are `localhost` and `5050`. The automatic request client also accepts `[server-address] [port] [requests-per-client]` (default `localhost`, `5050`, `200`; maximum `500`). Set `LUDOT_DB_PASSWORD` in the environment to use a non-empty H2 password; set it for both database and game-server processes.
 
 ## Socket protocol
 
-Communication is newline-delimited text over TCP.
+The game server uses UTF-8, newline-delimited TCP messages. A request is a positive request ID and command separated by a tab:
 
-| Direction        | Message                                                     | Purpose                                                                    |
-| :--------------- | :---------------------------------------------------------- | :------------------------------------------------------------------------- |
-| Client → server  | `START_GAME`                                                | Case-insensitively queues one full simulation.                             |
-| Server → clients | `RESET_BOARD`                                               | Returns the displayed pieces to base before a game.                        |
-| Server → clients | <code>PIECE&#124;id&#124;type&#124;colour&#124;index</code> | Publishes one piece location; `colour` may be `-` and `index` may be `-1`. |
-| Server → clients | Any other line                                              | Appends a human-readable event to the log.                                 |
+```text
+<request-id>\tSTART
+<request-id>\tSTATUS
+<request-id>\tLOG <session-id> <offset>
+```
 
-Clients receive broadcasts only after registration; a client joining mid-game receives no initial snapshot.
+`START` begins a new simulation (or returns the active one); `STATUS` returns its current snapshot; `LOG` retrieves a page of up to 2,000 saved messages. Replies are `<id>\tOK\t<snapshot>` or `<id>\tERROR\t<base64-error>`. Unsolicited updates use ID `0` and type `UPDATE`.
+
+A snapshot has seven tab-separated fields: revision, session ID, round, status, mystery-cell location, 16 comma-separated piece locations, and Base64-encoded recent log text. Base64 text is UTF-8. Requests are processed in order by the server's single worker; each client connection is limited to 128 characters per request line. The GUI and `GameClient` implement this protocol.
 
 ## Persistence
 
-When `ServerMain` starts, `GameResultRepository` creates `game_results` if needed. Each completed server game inserts only the winning colour and timestamp. Moves, board states, unfinished games, and client identities are not stored; local mode does not use H2.
+H2 stores data in `data/ludot.mv.db` by default. The JDBC repository creates `simulations` for the latest snapshot per session and `game_messages` for ordered session output. Each update saves the snapshot and new messages in one SQL transaction; output is returned in pages.
 
-```sql
-CREATE TABLE IF NOT EXISTS game_results (
-    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-    winner VARCHAR(20) NOT NULL,
-    completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
-)
-```
+On server startup, the latest snapshot and its messages are loaded. A simulation saved as `RUNNING` is marked `INTERRUPTED`; starting again creates a new session. The H2 TCP service is started separately by `DatabaseMain` and is not embedded in the game server process.
 
 ## Testing
 
-```powershell
+Tests are under `src/test/java/ludot`, organised around strategies, movement, model setup, game completion, server requests, GUI behaviour and persistence/architecture. Test support includes scripted randomness, isolated databases, subprocess fixtures and Swing window helpers.
+
+Run the JUnit suite with:
+
+```sh
 mvn test
 ```
 
-The suite contains **150 JUnit Jupiter tests across 40 test classes**, covering board and piece state, both movement directions, all player strategies, captures/blockades, round and bonus rules, mystery effects, termination, the GUI protocol, virtual-thread clients, serial server execution, socket state publication, and isolated/concurrent H2 persistence.
-
-```text
-Tests run: 150, Failures: 0, Errors: 0, Skipped: 0
-BUILD SUCCESS
-```
+The Maven Surefire configuration uses three forked JVMs. This README records the test organisation and command; it does not report a test run or outcome.
 
 ## Limitations and security notes
 
-- Local `GuiGameLogger` updates the event log but not the local board's piece positions; network observers do render `PIECE` updates.
-- Clients are observers only. Every client receives every broadcast, and there is no player assignment, authentication, authorization, or transport encryption.
-- Fixed empty-password H2 credentials and hard-coded endpoints are appropriate only for local development.
-- The server does not acknowledge invalid requests or provide late-joining clients with current state.
-- No coverage tool, CI workflow, deployment configuration, or in-app server/database shutdown command is present.
+- Players are automated; the GUI displays and starts the simulation but does not provide manual move controls.
+- The game protocol has no application-level authentication or encryption. The default game server binds to all network interfaces, so restrict access with host/network controls and do not expose it to untrusted networks.
+- The default database account uses an empty password. Configure `LUDOT_DB_PASSWORD` and restrict H2 TCP access before using data outside a local development environment.
+- The implementation uses one server worker for round advancement and request handling. It is a coursework simulation, not a hardened or horizontally scalable game service.
 
 ---
 
@@ -222,6 +160,6 @@ BUILD SUCCESS
 ---
 
 <div align="center">
-  <p><strong>Disclaimer</strong></p>
-  <p><em>This is an academic project developed for educational purposes and is not intended for commercial use.</em></p>
+&#x20; <p><strong>Disclaimer</strong></p>
+&#x20; <p><em>This is an academic project developed for educational purposes and is not intended for commercial use.</em></p>
 </div>

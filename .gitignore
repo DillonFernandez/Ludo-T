@@ -5,4 +5,4 @@
 /.github/
 
 # Local database file
-/ludotdb.mv.db
+/data/ludot.mv.db
